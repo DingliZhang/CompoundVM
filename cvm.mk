@@ -17,23 +17,40 @@
 # 2 along with this work; if not, write to the Free Software Foundation,
 # Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
 
+CVM_ARCH ?= $(shell uname -m)
 WORKSPACE := $(shell pwd)
 SHELL := /bin/bash
 BOOTJDK25 := $(WORKSPACE)/.bootjdks/jdk-25.0.1
 BOOTJDK8 := $(WORKSPACE)/.bootjdks/jdk8u452-b09
+# CVM_ARCH describes the target; Boot JDKs must run on the build host.
+ifeq ($(CVM_ARCH),x86_64)
+ARCH_DIR := amd64
+ARCH_DIR1 := x64
+else ifeq ($(CVM_ARCH),riscv64)
+ARCH_DIR := riscv64
+ARCH_DIR1 := riscv64
+else
+$(error Unsupported CVM_ARCH: $(CVM_ARCH); use x86_64 or riscv64)
+endif
+
 BUILDDIR := $(WORKSPACE)/cvm/build
 VERSION := $(shell cat $(WORKSPACE)/cvm/conf/version)
 OUTPUTDIR := $(WORKSPACE)/output
-DISTRO_NAME := CompoundVM_$(VERSION)_linux_x64
-DISTRO_JVM_PATCH_NAME := CompoundVM_$(VERSION)_jvm_patch_linux_x64
+DISTRO_NAME := CompoundVM_$(VERSION)_linux_$(ARCH_DIR1)
+DISTRO_JVM_PATCH_NAME := CompoundVM_$(VERSION)_jvm_patch_linux_$(ARCH_DIR1)
 CVM8DIR := $(BUILDDIR)/jdk8
 CVM8_JARDIR := $(CVM8DIR)/jre/lib
-CVM8_LIBDIR := $(CVM8DIR)/jre/lib/amd64
+CVM8_LIBDIR := $(CVM8DIR)/jre/lib/$(ARCH_DIR)
 MODE ?= slowdebug
 JAR ?= $(BOOTJDK25)/bin/jar
 JDK25_SRCROOT := $(WORKSPACE)
 CVM8_SRCROOT := $(WORKSPACE)/cvm
 JDK8_SRCROOT := $(CVM8_SRCROOT)/jdk8u
+# Use a complete target JDK 8 image when its source port is maintained separately.
+# Upstream JDK 8 sources do not provide the required RISC-V HotSpot port.
+JDK8_IMAGE ?=
+JDK25_CONF ?= linux-$(CVM_ARCH)-server-$(MODE)
+JDK25_CONFIGURE_ARGS ?=
 SRC_BUILDDIR_8 :=
 SRC_BUILDDIR_25 :=
 SCRIPTS_DIR ?= $(CVM8_SRCROOT)/scripts
@@ -71,7 +88,18 @@ define compile_alt_classes
 	fi
 endef
 
--bootstrap: -init-dirs $(BOOTJDK25)/ $(BOOTJDK8)/
+-bootstrap: -check-arch -init-dirs $(BOOTJDK25)/ $(BOOTJDK8)/
+
+-check-arch:
+ifneq ($(strip $(JDK8_IMAGE)),)
+	@test "$(realpath $(JDK8_IMAGE))" != "$(realpath $(CVM8DIR))" || { \
+		echo "JDK8_IMAGE must be outside the CVM staging directory $(CVM8DIR)."; exit 1; }
+endif
+ifeq ($(CVM_ARCH),riscv64)
+	@test -n "$(JDK8_IMAGE)" || { echo "RISC-V requires JDK8_IMAGE pointing to a RISC-V JDK 8 image."; exit 1; }
+	@test -x "$(BOOTJDK25)/bin/javac" -a -x "$(BOOTJDK8)/bin/javac" || { \
+		echo "Set BOOTJDK25 and BOOTJDK8 to JDKs that run on the build host."; exit 1; }
+endif
 
 -init-dirs:
 	[[ -d $(BUILDDIR) ]] || mkdir -p $(BUILDDIR)
@@ -145,10 +173,10 @@ cvm8default25: jdk8vm25
 	echo "-cvm KNOWN" >> $(CVM8_LIBDIR)/jvm.cfg
 	echo "-server KNOWN" >> $(CVM8_LIBDIR)/jvm.cfg
 	echo "-client IGNORE" >> $(CVM8_LIBDIR)/jvm.cfg
-	cp -f $(CVM8_LIBDIR)/jvm.cfg $(OUTPUTDIR)/$(DISTRO_NAME)/jre/lib/amd64/jvm.cfg
+	cp -f $(CVM8_LIBDIR)/jvm.cfg $(OUTPUTDIR)/$(DISTRO_NAME)/jre/lib/$(ARCH_DIR)/jvm.cfg
 
-JVM_PATCH_ARTIFACTS := jre/lib/rt25.jar jre/lib/rt8.jar jre/lib/amd64/libjava25.so jre/lib/amd64/libjimage25.so jre/lib/amd64/libjdwp25.so jre/lib/amd64/server25 jre/lib/amd64/jvm.cfg
-JVM_PATCH_ARTIFACTS_SOFTLINK := jre/lib/amd64/cvm
+JVM_PATCH_ARTIFACTS := jre/lib/rt25.jar jre/lib/rt8.jar jre/lib/$(ARCH_DIR)/libjava25.so jre/lib/$(ARCH_DIR)/libjimage25.so jre/lib/$(ARCH_DIR)/libjdwp25.so jre/lib/$(ARCH_DIR)/server25 jre/lib/$(ARCH_DIR)/jvm.cfg
+JVM_PATCH_ARTIFACTS_SOFTLINK := jre/lib/$(ARCH_DIR)/cvm
 
 jvm-patch: cvm8default25
 	@echo "###### Composing CVM8 jvm patch ######"
@@ -183,12 +211,16 @@ endef
 jdk8vm25: build_jdk8u build_jdk25u altkernel
 	@echo
 	@echo "###### Composing CVM8 ######"
-	$(eval SRC_BUILDDIR_25=$(shell find $(JDK25_SRCROOT)/build -type f -name build.log | grep $(MODE) | xargs dirname))
+	$(eval SRC_BUILDDIR_25=$(JDK25_SRCROOT)/build/$(JDK25_CONF))
+ifeq ($(strip $(JDK8_IMAGE)),)
 	$(eval SRC_BUILDDIR_8=$(shell find $(JDK8_SRCROOT)/build -type f -name build.log | grep $(MODE) | xargs dirname))
 	$(eval JDK8_IMAGEDIR=$(shell find $(JDK8_SRCROOT)/build -type d -name j2sdk-image | grep $(MODE)))
+else
+	$(eval JDK8_IMAGEDIR=$(JDK8_IMAGE))
+endif
 	{ \
 		set -x; \
-		cp -Lfr $(JDK8_IMAGEDIR) $(CVM8DIR) && \
+		cp -Lfr $(JDK8_IMAGEDIR)/. $(CVM8DIR) && \
 		mkdir -p $(CVM8_LIBDIR)/server25 && \
 		cp -f $(BUILDDIR)/rt8.jar $(CVM8_JARDIR)/ && \
 		cp -f $(BUILDDIR)/rt25.jar $(CVM8_JARDIR)/ && \
@@ -216,6 +248,11 @@ endif
 	@echo "###### Done ######"
 	@echo
 
+ifneq ($(strip $(JDK8_IMAGE)),)
+build_jdk8u: -bootstrap
+	@test -f "$(JDK8_IMAGE)/jre/lib/rt.jar" -a -f "$(JDK8_IMAGE)/lib/$(ARCH_DIR)/jli/libjli.so" || { \
+		echo "JDK8_IMAGE must be a complete target JDK 8 image ($(CVM_ARCH))."; exit 1; }
+else
 build_jdk8u: -bootstrap $(JDK8_SRCROOT)/jdk
 	{ cd $(JDK8_SRCROOT); \
 		if [[ "x$$(find ./build -type f -name config.log | grep $(MODE))" = "x" ]]; then \
@@ -233,11 +270,13 @@ build_jdk8u: -bootstrap $(JDK8_SRCROOT)/jdk
 		[[ $$? -eq 0 ]] || exit 127; \
 	}
 
+endif
+
 # compile hotspot and java.base from jdk25u
 build_jdk25u: -bootstrap
 	{ \
-		if [[ "x$$(find ./build -type f -name config.log | grep $(MODE))" = "x" ]]; then \
-			bash configure --disable-warnings-as-errors \
+		if [[ ! -f build/$(JDK25_CONF)/spec.gmk ]]; then \
+			bash configure --disable-warnings-as-errors --with-conf-name=$(JDK25_CONF) \
 											--with-debug-level=$(MODE) \
 											--with-hotspot-target-classlib=8 \
 											--with-boot-jdk=$(BOOTJDK25) \
@@ -249,11 +288,14 @@ build_jdk25u: -bootstrap
 											--without-version-pre \
 											--without-version-opt \
 											--with-vendor-name="CompoundVM" \
-											--with-cvm-version-string=$(VERSION) \
+											--with-cvm-version-string=$(VERSION) $(JDK25_CONFIGURE_ARGS) \
 											; \
 		fi; \
 	}
-	make $(JDK_MAKE_OPTS) CONF=$(MODE) hotspot jdk.jdwp.agent
+	@grep -Eq '^HOTSPOT_TARGET_CLASSLIB[[:space:]]*:?=[[:space:]]*8$$' build/$(JDK25_CONF)/spec.gmk && \
+	  grep -Eq '^OPENJDK_TARGET_CPU[[:space:]]*:?=[[:space:]]*$(CVM_ARCH)$$' build/$(JDK25_CONF)/spec.gmk || { \
+		echo "JDK25_CONF must select a $(CVM_ARCH) build configured with --with-hotspot-target-classlib=8."; exit 1; }
+	make $(JDK_MAKE_OPTS) CONF=$(JDK25_CONF) hotspot jdk.jdwp.agent
 
 ################ alternative kernel classes ########
 # here we copy the JDK25 kernel classes to separate diretory,
@@ -391,6 +433,8 @@ help:
 	@echo "  make full-clean    Delete all artifacts, including sub-modules"
 	@echo "  make clean         Delete artifacts from directory build/"
 	@echo ""
+	@echo "RISC-V: set CVM_ARCH=riscv64, JDK8_IMAGE=<target JDK 8>, BOOTJDK25=<host JDK>,"
+	@echo "        BOOTJDK8=<host JDK 8>, JDK25_CONF=<configured target build>."
 	@echo "Test:"
 	@echo "  make test_jtreg8 JT_TEST=<test selection> JT_REPO=<repo dir>"
 	@echo "                     Run CVM8 jtreg8 test with given selection"

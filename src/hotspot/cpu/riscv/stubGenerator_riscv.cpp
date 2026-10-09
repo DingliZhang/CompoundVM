@@ -6646,10 +6646,16 @@ static const int64_t right_3_bits = right_n_bits(3);
       // Load target method from receiver
     __ load_heap_oop(xmethod, Address(j_rarg0, java_lang_invoke_MethodHandle::form_offset()), t0, t1);
     __ load_heap_oop(xmethod, Address(xmethod, java_lang_invoke_LambdaForm::vmentry_offset()), t0, t1);
+#if HOTSPOT_TARGET_CLASSLIB == 8
+    __ access_load_at(T_ADDRESS, IN_HEAP, xmethod,
+                      Address(xmethod, java_lang_invoke_MemberName::vmtarget_offset()),
+                      noreg, noreg);
+#else
     __ load_heap_oop(xmethod, Address(xmethod, java_lang_invoke_MemberName::method_offset()), t0, t1);
     __ access_load_at(T_ADDRESS, IN_HEAP, xmethod,
                       Address(xmethod, java_lang_invoke_ResolvedMethodName::vmtarget_offset()),
                       noreg, noreg);
+#endif
     __ sd(xmethod, Address(xthread, JavaThread::callee_target_offset())); // just in case callee is deoptimized
 
     __ ret();

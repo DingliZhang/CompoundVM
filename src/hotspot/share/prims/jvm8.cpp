@@ -110,6 +110,9 @@
 #endif
 
 #include <errno.h>
+#ifndef _WINDOWS
+#include <sys/socket.h>
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///  JDK8 compatibility
@@ -549,9 +552,8 @@ JVM_END
 
 
 JVM_LEAF(jint, JVM_SocketShutdown(jint fd, jint howto))
-  //%note jvm_r6
-  //return os::socket_shutdown(fd, howto);
-  return 0;
+  // JDK 8 libnet still calls this entry point; JDK 25 removed the os wrapper.
+  return ::shutdown(fd, howto);
 JVM_END
 
 
