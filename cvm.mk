@@ -33,6 +33,10 @@ else ifeq ($(CVM_ARCH),aarch64)
 	BOOTJDK8_URL := https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u372-b07/OpenJDK8U-jdk_aarch64_linux_hotspot_8u372b07.tar.gz
 	ARCH_DIR := aarch64
 	ARCH_DIR1 := aarch64
+else ifeq ($(CVM_ARCH),riscv64)
+	# Supply host Boot JDKs explicitly; there are no bundled RISC-V downloads.
+	ARCH_DIR := riscv64
+	ARCH_DIR1 := riscv64
 else
 	ARCH_ERROR := 1
 endif
@@ -49,6 +53,13 @@ JAR ?= $(BOOTJDK17)/bin/jar
 JDK17_SRCROOT := $(WORKSPACE)
 CVM8_SRCROOT := $(WORKSPACE)/cvm
 JDK8_SRCROOT := $(CVM8_SRCROOT)/jdk8u
+# A target JDK 8 image can supply the launcher, class library and native libraries.
+# RISC-V requires an image from a JDK 8 RISC-V port, not the upstream source tarball.
+JDK8_IMAGE ?=
+JDK17_CONF ?= linux-$(CVM_ARCH)-server-$(MODE)
+JDK17_CONFIGURE_ARGS ?=
+TOOLS_CC ?= gcc
+TOOLS_CFLAGS ?=
 
 # Debug-specific jtreg options
 ifeq ($(filter fastdebug slowdebug,$(MODE)),)
@@ -104,7 +115,7 @@ define compile_tools17_bin
 	@echo Compiling diagnosis tool $(TOOL_NAME)
 	[[ -d $(BUILDDIR)/bin/ ]] || mkdir -p $(BUILDDIR)/bin/
 
-	gcc -O2 -pie -fPIE\
+	$(TOOLS_CC) $(TOOLS_CFLAGS) -O2 -pie -fPIE\
 	  -DJAVA_ARGS='{ "-J-ms8m", "$(TOOL_MAIN_CLASS)", }' \
 	  -DAPP_CLASSPATH='{ "/lib/tools17.jar", "/lib/tools.jar", }' \
 	  -o $(BUILDDIR)/bin/$(TOOL_NAME) \
@@ -118,9 +129,18 @@ endef
 
 -check-arch:
 	if [ "$(ARCH_ERROR)" = "1" ]; then \
-		echo "Unsupported architecture! only x86_64 and aarch64 are supported."; \
+		echo "Unsupported architecture! only x86_64, aarch64 and riscv64 are supported."; \
 		exit 1; \
 	fi
+ifneq ($(strip $(JDK8_IMAGE)),)
+	@test "$(realpath $(JDK8_IMAGE))" != "$(realpath $(CVM8DIR))" || { \
+		echo "JDK8_IMAGE must be outside the CVM staging directory $(CVM8DIR)."; exit 1; }
+endif
+ifeq ($(CVM_ARCH),riscv64)
+	@test -n "$(JDK8_IMAGE)" || { echo "RISC-V requires JDK8_IMAGE pointing to a RISC-V JDK 8 image."; exit 1; }
+	@test -x "$(BOOTJDK17)/bin/javac" -a -x "$(BOOTJDK8)/bin/javac" || { \
+		echo "Set BOOTJDK17 and BOOTJDK8 to JDKs that run on the build host."; exit 1; }
+endif
 
 -init-dirs:
 	[[ -d $(BUILDDIR) ]] || mkdir -p $(BUILDDIR)
@@ -181,7 +201,7 @@ jvm-patch: cvm8default17
 	done
 	cd $(OUTPUTDIR)/$(DISTRO_NAME) && cp -a --parents $(JVM_PATCH_ARTIFACTS_SOFTLINK) $(OUTPUTDIR)/$(DISTRO_JVM_PATCH_NAME)/;
 
--clean-jdk8vm17:
+-clean-jdk8vm17: -check-arch
 	rm -fr $(BUILDDIR)/alt_kernel
 	rm -fr $(BUILDDIR)/jdk8
 
@@ -196,9 +216,8 @@ full-clean:
 jdk8vm17: -clean-jdk8vm17 -bootstrap build_jdk8u build_jdk17u altkernel
 	@echo
 	@echo "###### Composing CVM8 ######"
-	$(eval SRC_BUILDDIR_17=$(shell find $(JDK17_SRCROOT)/build -type f -name build.log | grep $(MODE) | xargs dirname))
-	$(eval SRC_BUILDDIR_8=$(shell find $(JDK8_SRCROOT)/build -type f -name build.log | grep $(MODE) | xargs dirname))
-	$(eval JDK8_IMAGEDIR=$(shell find $(JDK8_SRCROOT)/build -type d -name j2sdk-image | grep $(MODE)))
+	$(eval SRC_BUILDDIR_17=$(JDK17_SRCROOT)/build/$(JDK17_CONF))
+	$(eval JDK8_IMAGEDIR=$(if $(JDK8_IMAGE),$(JDK8_IMAGE),$(shell find $(JDK8_SRCROOT)/build -type d -name j2sdk-image | grep $(MODE))))
 	{ \
 		cp -Lfr $(JDK8_IMAGEDIR) $(CVM8DIR) && \
 		cp -f $(BUILDDIR)/rt17.jar $(CVM8_JARDIR)/ && \
@@ -228,6 +247,11 @@ endif
 	@echo "###### Done ######"
 	@echo
 
+ifneq ($(strip $(JDK8_IMAGE)),)
+build_jdk8u: -bootstrap
+	@test -f "$(JDK8_IMAGE)/jre/lib/rt.jar" -a -f "$(JDK8_IMAGE)/lib/$(ARCH_DIR)/jli/libjli.so" || { \
+		echo "JDK8_IMAGE must be a complete target JDK 8 image ($(CVM_ARCH))."; exit 1; }
+else
 build_jdk8u: -bootstrap $(JDK8_JDK_SRC)
 	{ cd $(JDK8_SRCROOT); \
 		if [[ "x$$(find ./build -type f -name config.log | grep $(MODE))" = "x" ]]; then \
@@ -245,10 +269,13 @@ build_jdk8u: -bootstrap $(JDK8_JDK_SRC)
 		[[ $$? -eq 0 ]] || exit 127; \
 	}
 
+endif
+
 # configure for jdk17u
 # $1 extra configure options
 define configure_jdk17u
 	bash configure \
+		--with-conf-name=$(JDK17_CONF) \
 		--with-debug-level=$(MODE) \
 		--with-boot-jdk=$(BOOTJDK17) \
 		--with-hotspot-target-classlib=8 \
@@ -260,17 +287,20 @@ define configure_jdk17u
 		--without-version-opt \
 		--with-cvm-version-string=$(VERSION) \
 		--with-vendor-name="CompoundVM" \
-		$(1)
+		$(JDK17_CONFIGURE_ARGS) $(1)
 endef
 
 # compile hotspot and java.base from jdk17u
 build_jdk17u: -bootstrap
 	{ \
-		if [[ "x$$(find ./build -type f -name config.log | grep $(MODE))" = "x" ]]; then \
+		if [[ ! -f build/$(JDK17_CONF)/spec.gmk ]]; then \
 			$(call configure_jdk17u) ; \
 		fi; \
 	}
-	make $(JDK_MAKE_OPTS) CONF=linux-$(CVM_ARCH)-server-$(MODE) hotspot jdk.jdwp.agent
+	@grep -Eq '^HOTSPOT_TARGET_CLASSLIB[[:space:]]*:?=[[:space:]]*8$$' build/$(JDK17_CONF)/spec.gmk && \
+	  grep -Eq '^OPENJDK_TARGET_CPU[[:space:]]*:?=[[:space:]]*$(CVM_ARCH)$$' build/$(JDK17_CONF)/spec.gmk || { \
+		echo "JDK17_CONF must select a $(CVM_ARCH) build configured with --with-hotspot-target-classlib=8."; exit 1; }
+	make $(JDK_MAKE_OPTS) CONF=$(JDK17_CONF) hotspot jdk.jdwp.agent
 
 GTEST_VERSION ?= $(shell sed -n 's/^GTEST_VERSION=//p' $(WORKSPACE)/make/conf/github-actions.conf | head -n 1)
 GTEST_ROOT := $(WORKSPACE)/.gtest
@@ -291,7 +321,7 @@ $(GTEST_HEADER):
 		rm -f $(GTEST_ARCHIVE); \
 	}
 
-HOTSPOT_GTEST_BUILD_DIR := $(JDK17_SRCROOT)/build/linux-$(CVM_ARCH)-server-$(MODE)
+HOTSPOT_GTEST_BUILD_DIR := $(JDK17_SRCROOT)/build/$(JDK17_CONF)
 HOTSPOT_GTEST_LAUNCHER := $(HOTSPOT_GTEST_BUILD_DIR)/images/test/hotspot/gtest/server/gtestLauncher
 HOTSPOT_GTEST_TEST ?= gtest:all
 HOTSPOT_GTEST_SELECTOR := $(patsubst %/server,%,$(patsubst gtest:%,%,$(HOTSPOT_GTEST_TEST)))
@@ -313,7 +343,7 @@ endif
 	}
 
 build_gtest_hotspot17: -configure_jdk17u_gtest
-	$(MAKE) $(JDK_MAKE_OPTS) CONF=linux-$(CVM_ARCH)-server-$(MODE) test-image-hotspot-gtest
+	$(MAKE) $(JDK_MAKE_OPTS) CONF=$(JDK17_CONF) test-image-hotspot-gtest
 
 ifeq ($(SKIP_BUILD), true)
 test_gtest_hotspot17:
@@ -358,9 +388,9 @@ altkernel: -bootstrap -tools17_jar -tools17_bin
 	$(call compile_alt_classes,$(CVM8_SRCROOT)/alt_app/tools17/src,$(BUILDDIR)/tools17/classes,$(TOOLS17_JAR),$(BOOTJDK8)/jre/lib/rt.jar:$(BOOTJDK8)/lib/tools.jar)
 
 -tools17_bin: $(BOOTJDK8)/
-	$(call compile_tools17_bin,$(BOOTJDK8)/lib,jinfo17,sun.tools.jinfo.JInfo17)
-	$(call compile_tools17_bin,$(BOOTJDK8)/lib,jstack17,sun.tools.jstack.JStack17)
-	$(call compile_tools17_bin,$(BOOTJDK8)/lib,jmap17,sun.tools.jmap.JMap17)
+	$(call compile_tools17_bin,$(if $(JDK8_IMAGE),$(JDK8_IMAGE),$(BOOTJDK8))/lib,jinfo17,sun.tools.jinfo.JInfo17)
+	$(call compile_tools17_bin,$(if $(JDK8_IMAGE),$(JDK8_IMAGE),$(BOOTJDK8))/lib,jstack17,sun.tools.jstack.JStack17)
+	$(call compile_tools17_bin,$(if $(JDK8_IMAGE),$(JDK8_IMAGE),$(BOOTJDK8))/lib,jmap17,sun.tools.jmap.JMap17)
 
 ############### Test ##################
 
@@ -425,6 +455,8 @@ ifeq ($(CVM_ARCH),x86_64)
 	JT_OPTS_EXCLUDE=-exclude:$(JDK8_SRCROOT)/$(JT_REPO)/test/ProblemList.txt -exclude:$(CVM8_SRCROOT)/conf/jtreg_jdk8_excludes.list -exclude:$(CVM8_SRCROOT)/conf/jtreg_hotspot8_excludes_x64.list
 else ifeq ($(CVM_ARCH),aarch64)
 	JT_OPTS_EXCLUDE=-exclude:$(JDK8_SRCROOT)/$(JT_REPO)/test/ProblemList.txt -exclude:$(CVM8_SRCROOT)/conf/jtreg_jdk8_excludes.list -exclude:$(CVM8_SRCROOT)/conf/jtreg_hotspot8_excludes_aarch64.list
+else ifeq ($(CVM_ARCH),riscv64)
+	JT_OPTS_EXCLUDE=-exclude:$(JDK8_SRCROOT)/$(JT_REPO)/test/ProblemList.txt -exclude:$(CVM8_SRCROOT)/conf/jtreg_jdk8_excludes.list
 else
 	ARCH_ERROR := 1
 endif

@@ -838,14 +838,15 @@ void C2_MacroAssembler::string_compare(Register str1, Register str2,
 
   BLOCK_COMMENT("string_compare {");
 
-  // Bizzarely, the counts are passed in bytes, regardless of whether they
-  // are L or U strings, however the result is always in characters.
+#if HOTSPOT_TARGET_CLASSLIB != 8
+  // Java 17 passes byte[] lengths. Java 8 already passes char[] lengths.
   if (!str1_isL) {
     sraiw(cnt1, cnt1, 1);
   }
   if (!str2_isL) {
     sraiw(cnt2, cnt2, 1);
   }
+#endif
 
   // Compute the minimum of the string lengths and save the difference in result.
   sub(result, cnt1, cnt2);
@@ -1470,12 +1471,15 @@ void C2_MacroAssembler::string_compare_v(Register str1, Register str2, Register 
 
   BLOCK_COMMENT("string_compare {");
 
-  // for Lating strings, 1 byte for 1 character
-  // for UTF16 strings, 2 bytes for 1 character
-  if (!str1_isL)
+#if HOTSPOT_TARGET_CLASSLIB != 8
+  // Java 17 passes byte[] lengths. Java 8 already passes char[] lengths.
+  if (!str1_isL) {
     sraiw(cnt1, cnt1, 1);
-  if (!str2_isL)
+  }
+  if (!str2_isL) {
     sraiw(cnt2, cnt2, 1);
+  }
+#endif
 
   // if str1 == str2, return the difference
   // save the minimum of the string lengths in cnt2.

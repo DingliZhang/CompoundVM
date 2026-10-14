@@ -294,6 +294,21 @@ public abstract class Reference<T> {
         return this.referent;
     }
 
+    // FinalReference.get() runs after the reference has become inactive. Use a
+    // regular field load, rather than Reference.get()'s weak-load intrinsic, so
+    // concurrent collectors do not hide the object from its finalizer.
+    T getFromInactiveFinalReference() {
+        assert this instanceof FinalReference;
+        assert next != null;
+        return this.referent;
+    }
+
+    void clearInactiveFinalReference() {
+        assert this instanceof FinalReference;
+        assert next != null;
+        this.referent = null;
+    }
+
     /**
      * Clears this reference object.  Invoking this method will not cause this
      * object to be enqueued.
